@@ -171,6 +171,35 @@ module Bitfield = struct
   }
 end
 
+module Palette = struct
+  type t = {
+    data: int array;
+    length: int;
+  }
+
+  let of_string (s:string): t =
+    let length = String.length s in
+    let data = Array.make length 0 in
+    String.iteri (fun i c -> Array.set data i (int_of_char c)) s;
+    {
+      data;
+      length;
+    }
+
+  let get_color t idx: int * int * int =
+    let offset = 4 * idx in
+    if offset + 2 >= t.length || offset < 0 then
+      (* Return black on invalid offsets *)
+      (0, 0, 0)
+    else
+      (* ignore the alpha channel *)
+      (
+        t.data.(offset+2),
+        t.data.(offset+1),
+        t.data.(offset+0)
+      )
+end
+
 (* This is a collection of the meta data we extract from a bmp image *)
 module BitmapMetaData = struct
   type compression_method =
@@ -224,7 +253,7 @@ module BitmapMetaData = struct
     file_header: FileHeader.t;
     info_header: bitmap_info_header;
     bitfields: bitfields option;
-    palette: string option;
+    palette: Palette.t option;
   }
 
   let int_of_bpp = function
@@ -310,7 +339,7 @@ module BitmapMetaData = struct
   (file_header: FileHeader.t)
   (info_header: bitmap_info_header)
   (ich:chunk_reader)
-  : (bitfields option * string option, [> errors]) result =
+  : (bitfields option * Palette.t option, [> errors]) result =
     let read_bitfields ~alpha (ich:chunk_reader) =
       get_int32 ich >>= Bitfield.of_mask >>= fun r ->
       get_int32 ich >>= Bitfield.of_mask >>= fun g ->
@@ -357,7 +386,9 @@ module BitmapMetaData = struct
       let max_palette_size = palette_colors * max_bytes_per_pixel in
       let offset_to_pixels = file_header.pixel_offset - info_header.size - FileHeader.size in
       let palette_size = min offset_to_pixels max_palette_size in
-      get_bytes_res ich palette_size >>= fun palette ->
+      get_bytes_res ich palette_size >>= fun palette_data ->
+
+      let palette = Palette.of_string palette_data in
 
       (* Ignore the rest of the bytes until we get to the pixels *)
       get_bytes_res ich (offset_to_pixels - palette_size) >>= fun _ ->
@@ -393,37 +424,21 @@ module ReadBMP : ReadImage = struct
     | Error (`End_of_file _) -> raise (Corrupted_image "Unexpected end of file")
     | Error (`Bmp_error msg) -> raise (Corrupted_image msg)
 
-  let get_color_1 palette bytes offset =
+  let get_color_1 (palette:Palette.t) bytes offset =
     let byte_offset = offset / 8 in
     let bit_offset = 7 - offset + byte_offset * 8 in
     let idx = ((int_of_char bytes.[byte_offset]) lsr bit_offset) land 0x1 in
-    assert (idx < 2 && idx >= 0);
-    (
-      (* ignore the alpha channel *)
-      int_of_char palette.[4*idx+2],
-      int_of_char palette.[4*idx+1],
-      int_of_char palette.[4*idx+0]
-    )
+    Palette.get_color palette idx
 
   let get_color_4 palette bytes offset =
     let byte_offset = offset / 2 in
     let shift = (offset mod 2) * 4 in
     let idx = ((int_of_char bytes.[byte_offset]) lsr shift) land 0x0f in
-    (
-      (* ignore the alpha channel *)
-      int_of_char palette.[4*idx+2],
-      int_of_char palette.[4*idx+1],
-      int_of_char palette.[4*idx+0]
-    )
+    Palette.get_color palette idx
 
   let get_color_8 palette bytes offset =
     let idx = int_of_char bytes.[offset] in
-    (
-      (* ignore the alpha channel *)
-      int_of_char palette.[4*idx+2],
-      int_of_char palette.[4*idx+1],
-      int_of_char palette.[4*idx+0]
-    )
+    Palette.get_color palette idx
 
   let get_color_16_bitmasks bms bytes offset =
     let bm_r, bm_g, bm_b, bm_a = bms in
